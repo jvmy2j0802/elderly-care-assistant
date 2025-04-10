@@ -1,0 +1,8 @@
+langchain
+langchain_community
+langgraph
+transformers
+torch
+gradio
+faiss-cpu
+pandas
