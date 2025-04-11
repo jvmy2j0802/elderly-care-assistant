@@ -1,31 +1,31 @@
-import sys
-import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import gradio as gr
 from agent_runner import app
+from langchain_core.messages import HumanMessage
 
-with gr.Blocks() as demo:
+# === Backend Function ===
+def chat_with_agent(user_input, history):
+    # Convert history to message list if needed
+    messages = [HumanMessage(content=msg[0]) for msg in history]
+    messages.append(HumanMessage(content=user_input))
+
+    result = app.invoke({"messages": messages})
+    reply = result["messages"][-1].content
+    history.append((user_input, reply))
+    return "", history
+
+# === UI Setup ===
+with gr.Blocks(title="Elderly Care AI Assistant") as demo:
+    gr.Markdown("## 🧓🤖 Elderly Care AI Assistant\nAsk me anything related to health, safety, reminders, or medicine!")
+
     chatbot = gr.Chatbot()
-    msg = gr.Textbox(label="Ask your elderly care assistant:")
+    msg = gr.Textbox(placeholder="Ask your elderly care assistant...")
     clear = gr.Button("Clear")
 
-    def user(message, history):
-        history = history or []
-        history.append((message, ""))
-        return "", history
+    history_state = gr.State([])
 
-    def bot(history):
-        user_input = history[-1][0]
-        response_stream = app(user_input)
-        final_response = ""
-        for partial_response in response_stream:
-            final_response += partial_response
-            history[-1] = (user_input, final_response)
-            yield history
+    msg.submit(chat_with_agent, [msg, history_state], [msg, chatbot])
+    clear.click(lambda: ([], ""), None, [chatbot, msg, history_state])
 
-    msg.submit(user, [msg, chatbot], [msg, chatbot], queue=False).then(
-        bot, chatbot, chatbot
-    )
-    clear.click(lambda: None, None, chatbot, queue=False)
-
-demo.launch()
+# === Launch ===
+if __name__ == "__main__":
+    demo.launch()

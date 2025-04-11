@@ -1,83 +1,76 @@
-# LLMs & Agents
-from langchain.agents import Tool
-from langchain_community.chat_models import ChatHuggingFace
-from langgraph.prebuilt import create_react_agent
-from langgraph.graph import StateGraph, END
+from transformers import pipeline
+from langchain_huggingface import ChatHuggingFace
+from langgraph.graph import END, StateGraph
+from langchain_core.messages import HumanMessage, BaseMessage
+from typing import TypedDict, Annotated
 
-# Transformers for Hugging Face integration
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
-from langchain_community.chat_models import ChatHuggingFace
-
-# Modular tools
+# === Local Tools ===
 from tools.health_tools import get_recent_health_alerts
+from tools.db_tools import get_user_info, med_info
 from tools.safety_tools import get_recent_falls
-from tools.reminder_tools import get_today_reminders
 
-# ---------------------
-# 1. Define available tools for the agent
-# ---------------------
-tools = [
-    Tool(
-        name="GetRecentHealthAlerts",
-        func=get_recent_health_alerts,
-        description="Fetch recent health alerts for a user. Input: user ID (string)."
-    ),
-    Tool(
-        name="GetRecentFalls",
-        func=get_recent_falls,
-        description="Fetch recent fall incidents for a user. Input: user ID (string)."
-    ),
-    Tool(
-        name="GetTodayReminders",
-        func=get_today_reminders,
-        description="Get today's reminders for a user. Input: user ID (string)."
-    ),
-]
-
-# ---------------------
-# 2. Load Hugging Face LLM
-# ---------------------
-model_id = "google/flan-t5-base"  # Or try "google/flan-t5-small"
-
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
-
+# === LLM Setup ===
+model_id = "google/flan-t5-small"
 hf_pipeline = pipeline(
-    "text2text-generation",  # Note: flan-t5 uses this task
-    model=model,
-    tokenizer=tokenizer,
-    max_new_tokens=512,
+    "text2text-generation",
+    model=model_id,
+    tokenizer=model_id,
+    max_length=512,
+    do_sample=True,
 )
-
 llm = ChatHuggingFace(pipeline=hf_pipeline)
 
-# ---------------------
-# 3. Create ReAct agent using LangGraph prebuilt
-# ---------------------
-agent_node = create_react_agent(llm, tools)
+# === State Definition ===
+class AgentState(TypedDict):
+    messages: Annotated[list[BaseMessage], "Messages"]
 
-# ---------------------
-# 4. Build LangGraph stateful agent workflow
-# ---------------------
-builder = StateGraph()
-builder.add_node("agent", agent_node)
-builder.set_entry_point("agent")
-builder.add_edge("agent", END)
+# === Default LLM Agent ===
+def ai_agent(state: AgentState) -> AgentState:
+    response = llm.invoke(state["messages"])
+    state["messages"].append(response)
+    return state
 
-# ---------------------
-# 5. Compile the graph into an executable app
-# ---------------------
-app = builder.compile()
+# === Routing Logic ===
+def route_tool(state: AgentState):
+    user_input = state["messages"][-1].content.lower()
+    if any(term in user_input for term in ["health", "heart", "glucose", "spo2", "oxygen", "alerts"]):
+        return "health_alerts"
+    elif any(term in user_input for term in ["fall", "incident", "safety"]):
+        return "fall_events"
+    elif any(term in user_input for term in ["user info", "user profile", "who is", "about user"]):
+        return "user_info"
+    elif any(term in user_input for term in ["medicine", "medication", "drugs", "tablet"]):
+        return "medicine_info"
+    else:
+        return "ai_agent"
 
-# ---------------------
-# 6. Stream-compatible wrapper function for UI
-# ---------------------
-def app(user_input: str):
-    events = app.stream({"messages": [{"role": "user", "content": user_input}]})
-    full_response = ""
-    for event in events:
-        if "messages" in event:
-            for msg in event["messages"]:
-                if msg.get("role") == "assistant":
-                    full_response += msg.get("content", "")
-                    yield msg.get("content", "")
+# === LangGraph Workflow ===
+workflow = StateGraph(AgentState)
+
+# Agent & Tools
+workflow.add_node("ai_agent", ai_agent)
+workflow.add_node("health_alerts", get_recent_health_alerts)
+workflow.add_node("fall_events", get_recent_falls)
+workflow.add_node("user_info", get_user_info)
+workflow.add_node("medicine_info", med_info)
+
+# Entry Point
+workflow.set_entry_point("ai_agent")
+
+# Conditional Routing
+workflow.add_conditional_edges("ai_agent", route_tool, {
+    "health_alerts": "health_alerts",
+    "fall_events": "fall_events",
+    "user_info": "user_info",
+    "medicine_info": "medicine_info",
+    "ai_agent": END,
+})
+
+# End Nodes
+workflow.add_edge("health_alerts", END)
+workflow.add_edge("fall_events", END)
+workflow.add_edge("user_info", END)
+workflow.add_edge("medicine_info", END)
+
+# Compile app
+app = workflow.compile()
